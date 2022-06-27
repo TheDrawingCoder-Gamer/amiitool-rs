@@ -33,7 +33,7 @@ use sha2::Sha256;
 use std::io;
 use std::io::{Cursor, Write};
 #[derive(Copy, Clone, Debug)]
-struct MasterKeys {
+pub struct MasterKeys {
     hmac_key: [u8; 16],
     type_string: [u8; 14],
     magic_bytes_size: u8,
@@ -46,6 +46,7 @@ struct DerivedKeys {
     aes_iv: [u8; 16],
     hmac_key: [u8; 16],
 }
+
 fn len_range(start: usize, len : usize) -> std::ops::Range<usize> {
     start..start+len
 }
@@ -56,56 +57,64 @@ fn memcpy<T:Copy>(dest: &mut [T], dest_offset: usize, source: &[T], source_offse
     dest[len_range(dest_offset, len)].copy_from_slice(&source[len_range(source_offset, len)])
 }
 fn keygen_prepare_seed(base_keys: &MasterKeys, base_seed: [u8; KEYGEN_SEED_SIZE]) -> io::Result<Vec<u8>> {
+    if base_keys.magic_bytes_size > 16 {
+       return Err(io::Error::new(io::ErrorKind::InvalidData,"magic byte size too big")); 
+    }
 
-    // imagine writing in a language that allows null
-    // ... anyways
-    let output: Vec<u8> = Vec::new();
-    let mut cursor = Cursor::new(output);
+    let mut cursor = Cursor::new(Vec::new());
     // this is meant to get all things
     let da_str : Vec<u8>= base_keys.type_string.iter().take_while(|x| **x != 0).copied().collect();
-    println!("{:?}", da_str);
     // 1: Copy whole type string
     cursor.write(&da_str)?;
+    // this single line fixes the entire lib. ffk;afoih
+    cursor.write(&[0])?;
 
+    
     // 2 : append (16 - magic_bytes_size) from the base seed
     let lead_size: usize = 16 - base_keys.magic_bytes_size as usize;
-    cursor.write(&base_seed[0..lead_size])?;
+    // again, prints the same as amiitool
+    cursor.write(&base_seed[len_range(0, lead_size)])?;
     // 3: append all bytes from magic bytes
     cursor.write(&base_keys.magic_bytes[0..base_keys.magic_bytes_size as usize])?;
     // 4: Append bytes 0x10-0x1F
-    cursor.write(&base_seed[0x10..=0x1F])?;
+    cursor.write(&base_seed[len_range(0x10,16)])?;
+    // this position is behind by one...
     for i in 0..32 {
         cursor.write(&[base_seed[i + 32] ^ base_keys.xor_pad[i]])?;
     }
     let vec = cursor.into_inner();
-    println!("{}", vec.len());
     Ok(vec)
 }
 
 fn keygen_gen(base_keys: &MasterKeys, base_seed: [u8; KEYGEN_SEED_SIZE]) -> io::Result<DerivedKeys> {
+    // whatever calls into here always correctly gets the base seed
     let res = keygen_prepare_seed(base_keys, base_seed)?;
-    let bytes = drbg_gen_bytes(base_keys.hmac_key, &res);
+    // however, seed generation fails
+    let bytes = drbg_gen_bytes(base_keys.hmac_key, &res); // called from here, likely culprit. 
     println!("{:?}", bytes);
     Ok(bytes)
 }
-fn drbg_step(hmac_key: [u8; 16], seed: &[u8], iteration: &mut u16) -> [u8; DRBG_OUTPUT_SIZE] {
+fn drbg_init(hmac_key: [u8; 16]) -> Hmac256 {
+    Hmac256::new_from_slice(&hmac_key).expect("fixed slice length")
+}
+// obviously wrong output
+fn drbg_step(hmac: &mut Hmac256, seed: &[u8], iteration: &mut u16) -> [u8; DRBG_OUTPUT_SIZE] {
     let mut vec = Vec::new();
     vec.extend_from_slice(&u16::to_be_bytes(*iteration));
     vec.extend_from_slice(&seed);
     *iteration += 1;
-    let mut out = [0; DRBG_OUTPUT_SIZE];
-    compute_hmac(hmac_key, vec.as_slice(), 0, vec.len(), &mut out, 0);
-    out
+    hmac.update(vec.as_slice());
+    hmac.finalize_reset().into_bytes().try_into().unwrap()
 }
 
 type Hmac256 = hmac::Hmac<Sha256>;
+// todo: obviously wrong output
 fn drbg_gen_bytes<'a>(hmac_key: [u8; 16], seed: &[u8]) -> DerivedKeys {
     let mut i = 0;
     let mut out = [0u8; 48];
-
-    out[0..32].copy_from_slice(&drbg_step(hmac_key, seed, &mut i));
-    out[32..48].copy_from_slice(&drbg_step(hmac_key, seed, &mut i)[0..16]);
-
+    let mut hmac = drbg_init(hmac_key);
+    out[0..32].copy_from_slice(&drbg_step(&mut hmac, seed, &mut i));
+    out[32..48].copy_from_slice(&drbg_step(&mut hmac, seed, &mut i)[0..16]);
     DerivedKeys { aes_key : out[0..16].try_into().unwrap(), aes_iv: out[16..32].try_into().unwrap(), hmac_key: out[32..48].try_into().unwrap() } 
 }
 const AMIIBO_SIZE: usize = 540;
@@ -124,7 +133,7 @@ fn amiibo_keygen(master_keys: &MasterKeys, dump: [u8; AMIIBO_SIZE]) -> io::Resul
 }
 
 use aes::cipher::{KeyIvInit, StreamCipher};
-type Aes128Ctr = ctr::Ctr64BE<aes::Aes128>;
+type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 fn amiibo_cipher(derived_keys: &DerivedKeys, input: [u8; AMIIBO_SIZE], out: &mut [u8; AMIIBO_SIZE]) -> () {
     let mut cipher: Aes128Ctr =
         Aes128Ctr::new(&derived_keys.aes_key.into(), &derived_keys.aes_iv.into());
@@ -247,11 +256,47 @@ pub fn load_keys(path: &str) -> std::io::Result<AmiiboKeys> {
     }
 }
 
+pub fn read_master_key(key: [u8; 80]) -> io::Result<MasterKeys> {
+    let res = MasterKeys {
+        hmac_key: key[0..16].try_into().unwrap(),
+        type_string: key[16..30].try_into().unwrap(),
+        magic_bytes_size: key[31], // 31 is intentional, i'm skipping over an unused field
+        magic_bytes: key[32..48].try_into().unwrap(), 
+        xor_pad: key[48..80].try_into().unwrap()
+    };
+    if res.magic_bytes_size > 16 {
+        Err(io::Error::new(io::ErrorKind::InvalidData, "magic bytes too big"))
+    } else {
+        Ok(res)
+    }
+}
+
+pub fn read_amiibo_keys(key: [u8; 160]) -> io::Result<AmiiboKeys> {
+    let data = read_master_key(key[0..80].try_into().unwrap())?;
+    let tag  = read_master_key(key[80..160].try_into().unwrap())?;
+    Ok(AmiiboKeys {data, tag})
+}
 fn compute_hmac(key: [u8; 16], input: &[u8], input_offset: usize, input_len: usize, output: &mut [u8], output_offset: usize)  {
     let mut hmac = Hmac256::new_from_slice(&key).expect("fixed length slice");
     hmac.update(&input[len_range(input_offset, input_len)]);
     output[len_range(output_offset, DRBG_OUTPUT_SIZE)].copy_from_slice(&hmac.finalize().into_bytes());
         
 }
+/*
+fn printhex(data: &[u8]) {
+    for i in 0..data.len() {
+        if (i % 16) > 0 {
+            print!(" ");
+        }
+        print!("{:02X}", data[i]);
+        if (i % 16) == 15 {
+            print!("\n");
+        }
+    }
+    print!("\n");
+    if (data.len() % 16) != 0 {
+        print!("\n");
+    } 
+}
 
-
+*/
