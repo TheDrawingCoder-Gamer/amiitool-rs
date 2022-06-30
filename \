@@ -1,4 +1,5 @@
 #[cfg(test)]
+#[cfg(feature = "fs")]
 mod tests {
     use crate::*;
     #[test]
@@ -7,19 +8,19 @@ mod tests {
         // this is emitted from amiitool, which is known to produce good bins
         let sample_signed  : [u8; AMIIBO_SIZE] = std::fs::read("sample_signed.bin").unwrap().try_into().unwrap(); 
         // this is an unencrpyted file
-        let sample_unsigned : [u8; AMIIBO_SIZE]= std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
+        let sample_unsigned = std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
 
-        let packed_sample : [u8; AMIIBO_SIZE] = amiibo_pack(&keys, sample_unsigned.into()).unwrap().into();
+        let packed_sample = amiibo_pack(&keys, sample_unsigned).unwrap();
         
         assert_eq!(packed_sample, sample_signed);
     }
     #[test]
     fn unpacking() {
         let keys = load_keys("key_retail.bin").unwrap();
-        let sample_signed : [u8; AMIIBO_SIZE] = std::fs::read("sample_signed.bin").unwrap().try_into().unwrap();
+        let sample_signed = std::fs::read("sample_signed.bin").unwrap().try_into().unwrap();
         let sample_unsigned : [u8; AMIIBO_SIZE] = std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
 
-        let unpacked_sample : [u8; AMIIBO_SIZE] = amiibo_unpack(&keys, sample_signed.into()).unwrap().get_unchecked().into();
+        let unpacked_sample = amiibo_unpack(&keys, sample_signed).unwrap().get_unchecked();
 
         assert_eq!(unpacked_sample, sample_unsigned);
     }
@@ -45,12 +46,10 @@ struct DerivedKeys {
     aes_iv: [u8; 16],
     hmac_key: [u8; 16],
 }
-#[derive(Debug, Copy, Clone)]
 pub struct PackedAmiibo {
     amiibo: [u8; AMIIBO_SIZE]
 }
 
-#[derive(Debug, Copy, Clone)]
 pub struct PlainAmiibo {
     amiibo: [u8; AMIIBO_SIZE]
 }
@@ -96,21 +95,6 @@ impl From<PackedAmiibo> for [u8; AMIIBO_SIZE] {
         thing.amiibo
     }
 }
-impl TryFrom<&[u8]> for PackedAmiibo {
-    type Error = std::array::TryFromSliceError;
-    fn try_from(slice: &[u8]) -> Result<Self, Self::Error> {
-        let arr = slice.try_into()?;
-        Ok(PackedAmiibo { amiibo: arr })
-    }
-}
-
-impl TryFrom<&[u8]> for PlainAmiibo {
-    type Error = std::array::TryFromSliceError;
-    fn try_from(slice: &[u8]) -> Result<Self, Self::Error> {
-        let arr = slice.try_into()?;
-        Ok(PlainAmiibo { amiibo: arr })
-    }
-}
 #[derive(Clone, Debug)]
 pub struct AmiitoolError {
     why : String
@@ -140,9 +124,9 @@ fn memset<T:Clone>(dest: &mut [T], dest_offset: usize, data : T, len : usize) {
 fn memcpy<T:Copy>(dest: &mut [T], dest_offset: usize, source: &[T], source_offset: usize, len : usize) {
     dest[len_range(dest_offset, len)].copy_from_slice(&source[len_range(source_offset, len)])
 }
-fn keygen_prepare_seed(base_keys: &MasterKeys, base_seed: [u8; KEYGEN_SEED_SIZE]) -> Result<Vec<u8>, AmiitoolError> {
+fn keygen_prepare_seed(base_keys: &MasterKeys, base_seed: [u8; KEYGEN_SEED_SIZE]) -> io::Result<Vec<u8>> {
     if base_keys.magic_bytes_size > 16 {
-       return Err(AmiitoolError { why : "magic byte size too big".to_string() } ); 
+       return Err(io::Error::new(io::ErrorKind::InvalidData,"magic byte size too big")); 
     }
 
     let mut cursor = Cursor::new(Vec::new());
@@ -169,9 +153,10 @@ fn keygen_prepare_seed(base_keys: &MasterKeys, base_seed: [u8; KEYGEN_SEED_SIZE]
     Ok(vec)
 }
 
-fn keygen_gen(base_keys: &MasterKeys, base_seed: [u8; KEYGEN_SEED_SIZE]) -> Result<DerivedKeys, AmiitoolError> {
+fn keygen_gen(base_keys: &MasterKeys, base_seed: [u8; KEYGEN_SEED_SIZE]) -> io::Result<DerivedKeys> {
     let res = keygen_prepare_seed(base_keys, base_seed)?;
     let bytes = drbg_gen_bytes(base_keys.hmac_key, &res);
+    println!("{:?}", bytes);
     Ok(bytes)
 }
 fn drbg_init(hmac_key: [u8; 16]) -> Hmac256 {
@@ -205,7 +190,7 @@ fn amiibo_calc_seed(dump: [u8; AMIIBO_SIZE]) -> [u8; KEYGEN_SEED_SIZE] {
     memcpy(&mut key, 0x20, &dump, 0x1E8, 0x20);
     key
 }
-fn amiibo_keygen(master_keys: &MasterKeys, dump: [u8; AMIIBO_SIZE]) -> Result<DerivedKeys, AmiitoolError> {
+fn amiibo_keygen(master_keys: &MasterKeys, dump: [u8; AMIIBO_SIZE]) -> io::Result<DerivedKeys> {
     let seed = amiibo_calc_seed(dump);
     keygen_gen(master_keys, seed)
 }
@@ -267,7 +252,7 @@ impl UnverifiedAmiibo {
            || self.data[HMAC_POS_TAG..HMAC_POS_TAG + 32] != self.intl[HMAC_POS_TAG..HMAC_POS_TAG + 32] {
             Err(AmiitoolError { why : "Invalid Signature".to_string() })
         } else {
-            Ok(self.data.into())
+            Ok(self.data)
         }
     }
     pub fn get_unchecked(self) -> PlainAmiibo {
@@ -316,7 +301,9 @@ pub fn amiibo_pack(amiibo_keys: &AmiiboKeys, plain_amiibo: PlainAmiibo) -> Resul
     memcpy(&mut packed, 0x208, &plain, 0x208, 0x14);
     Ok(packed.into())
 }
+#[cfg(feature = "fs")]
 use std::io::{BufRead, BufReader, Read};
+#[cfg(feature = "fs")]
 pub fn load_keys(path: &str) -> std::io::Result<AmiiboKeys> {
     let file = std::fs::File::open(path)?;
     let mut buf = BufReader::new(file);

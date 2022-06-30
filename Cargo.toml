@@ -14,4 +14,5 @@ digest = "0.10.3"
 generic-array = "0.14.5"
 typenum = "1.15.0"
 ctr = { version = "0.9.1", features = ["std"] }
-aes = { version = "0.8.1"} 
+aes = { version = "0.8.1"}
+rand = "0.8.4" 
