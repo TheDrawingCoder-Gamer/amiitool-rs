@@ -10,7 +10,7 @@ mod tests {
         let sample_unsigned : [u8; AMIIBO_SIZE]= std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
 
         let packed_sample : [u8; AMIIBO_SIZE] = amiibo_pack(&keys, sample_unsigned.into()).unwrap().into();
-        
+        std::fs::write("testpack.bin", packed_sample).unwrap(); 
         assert_eq!(packed_sample, sample_signed);
     }
     #[test]
@@ -19,8 +19,8 @@ mod tests {
         let sample_signed : [u8; AMIIBO_SIZE] = std::fs::read("sample_signed.bin").unwrap().try_into().unwrap();
         let sample_unsigned : [u8; AMIIBO_SIZE] = std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
 
-        let unpacked_sample : [u8; AMIIBO_SIZE] = amiibo_unpack(&keys, sample_signed.into()).unwrap().get_unchecked().into();
-
+        let unpacked_sample : [u8; AMIIBO_SIZE] = amiibo_unpack(&keys, sample_signed.into()).unwrap().get_checked().expect("Invalid signature").into();
+        std::fs::write("testunpack.bin", unpacked_sample).unwrap();
         assert_eq!(unpacked_sample, sample_unsigned);
     }
 }
@@ -150,6 +150,7 @@ fn keygen_prepare_seed(base_keys: &MasterKeys, base_seed: [u8; KEYGEN_SEED_SIZE]
     // 1: Copy whole type string
     cursor.write(&da_str)?;
     // this single line fixes the entire lib. ffk;afoih
+    // putting my thinking cap on this is the `\0` at the end of a C string 
     cursor.write(&[0])?;
 
     
@@ -212,29 +213,39 @@ fn amiibo_keygen(master_keys: &MasterKeys, dump: [u8; AMIIBO_SIZE]) -> Result<De
 use aes::cipher::{KeyIvInit, StreamCipher};
 type Aes128Ctr = ctr::Ctr128BE<aes::Aes128>;
 // slightly wrong output on not real inputs
-fn amiibo_cipher(derived_keys: &DerivedKeys, input: [u8; AMIIBO_SIZE]) -> [u8; AMIIBO_SIZE] {
+fn amiibo_cipher(derived_keys: &DerivedKeys, input: [u8; AMIIBO_SIZE], out: &mut[u8; AMIIBO_SIZE]) -> () {
     let mut cipher: Aes128Ctr =
         Aes128Ctr::new(&derived_keys.aes_key.into(), &derived_keys.aes_iv.into());
 
-    let mut out = [0; AMIIBO_SIZE]; 
     
     cipher.apply_keystream_b2b(&input[len_range(0x2c, 0x188)], &mut out[len_range(0x2c, 0x188)]).unwrap();
-    memcpy(&mut out, 0, &input, 0, 0x8);
+    memcpy(out, 0, &input, 0, 0x8);
     // data sig NOT copied
-    memcpy(&mut out, 0x28, &input, 0x28, 0x4);
+    memcpy(out, 0x28, &input, 0x28, 0x4);
     // tag sig NOT copied
-    memcpy(&mut out, 0x1d4, &input, 0x1d4, 0x34);
-    out
+    memcpy(out, 0x1d4, &input, 0x1d4, 0x34);
 
+}
+fn null_cipher(derived_keys: &DerivedKeys, input: [u8; AMIIBO_SIZE]) -> [u8; AMIIBO_SIZE] {
+    let mut out = [0; AMIIBO_SIZE];
+    amiibo_cipher(derived_keys, input, &mut out);
+    out 
 }
 fn amiibo_tag_to_internal(tag: [u8; AMIIBO_SIZE]) -> [u8; AMIIBO_SIZE] {
     let mut out = [0; AMIIBO_SIZE];
+    // BCC1, internal, static lock, CC
     memcpy(&mut out, 0x0, &tag, 0x8, 0x8);
+    // unfixed hash
     memcpy(&mut out, 0x8, &tag, 0x80, 0x20);
+    // pages 4-12 inclusive
     memcpy(&mut out, 0x28, &tag, 0x10, 0x24);
+    // pages 40-129 inclusive 
     memcpy(&mut out, 0x4c, &tag, 0xa0, 0x168);
+    // pages 13 to 20 inclusive 
     memcpy(&mut out, 0x1b4, &tag, 0x34, 0x20);
+    // UID 
     memcpy(&mut out, 0x1d4, &tag, 0x0, 0x8);
+    // amiibo id
     memcpy(&mut out, 0x1dc, &tag, 0x54, 0x2c);
     out.try_into().unwrap()
 }
@@ -242,12 +253,13 @@ fn amiibo_tag_to_internal(tag: [u8; AMIIBO_SIZE]) -> [u8; AMIIBO_SIZE] {
 fn amiibo_internal_to_tag(internal: [u8; AMIIBO_SIZE]) -> [u8; AMIIBO_SIZE] {
     let mut out = [0;  AMIIBO_SIZE];
     memcpy(&mut out, 0x008, &internal, 0x000, 0x008);
-	memcpy(&mut out, 0x080, &internal, 0x008, 0x020);
-	memcpy(&mut out, 0x010, &internal, 0x028, 0x024);
-	memcpy(&mut out, 0x0A0, &internal, 0x04C, 0x168);
-	memcpy(&mut out, 0x034, &internal, 0x1B4, 0x020);
-	memcpy(&mut out, 0x000, &internal, 0x1D4, 0x008);
-	memcpy(&mut out, 0x054, &internal, 0x1DC, 0x02C);
+    memcpy(&mut out, 0x080, &internal, 0x008, 0x020);
+    memcpy(&mut out, 0x010, &internal, 0x028, 0x024);
+    memcpy(&mut out, 0x0A0, &internal, 0x04C, 0x168);
+    memcpy(&mut out, 0x034, &internal, 0x1B4, 0x020);
+    memcpy(&mut out, 0x000, &internal, 0x1D4, 0x008);
+    // amiibo id ? 
+    memcpy(&mut out, 0x054, &internal, 0x1DC, 0x02C);
     out
 }
 
@@ -264,12 +276,15 @@ pub struct UnverifiedAmiibo {
 
 impl UnverifiedAmiibo {
     pub fn get_checked(self) -> Result<PlainAmiibo, AmiitoolError> {
-        if self.data[HMAC_POS_DATA..HMAC_POS_DATA + 32] != self.intl[HMAC_POS_DATA..HMAC_POS_DATA + 32] 
-           || self.data[HMAC_POS_TAG..HMAC_POS_TAG + 32] != self.intl[HMAC_POS_TAG..HMAC_POS_TAG + 32] {
-            Err(AmiitoolError { why : "Invalid Signature".to_string() })
-        } else {
+        if self.is_valid() {
             Ok(self.data.into())
+        } else {
+            Err(AmiitoolError { why : "Invalid Signature".to_string() })
         }
+    }
+    pub fn is_valid(&self) -> bool {
+        self.data[HMAC_POS_DATA..HMAC_POS_DATA + 32] == self.intl[HMAC_POS_DATA..HMAC_POS_DATA + 32] 
+           && self.data[HMAC_POS_TAG..HMAC_POS_TAG + 32] == self.intl[HMAC_POS_TAG..HMAC_POS_TAG + 32]
     }
     pub fn get_unchecked(self) -> PlainAmiibo {
         self.data.into()
@@ -285,7 +300,7 @@ pub fn amiibo_unpack(amiibo_keys: &AmiiboKeys, amiibo: PackedAmiibo) -> Result<U
     let tag_keys = amiibo_keygen(&amiibo_keys.tag, intl).unwrap();
 
     // decrypt
-    let mut plain = amiibo_cipher(&data_keys, intl);
+    let mut plain = null_cipher(&data_keys, intl);
     let cur_plain = plain.clone();
     // Regenerate tag HMAC. Order matters, data HMAC depends on tag HMAC.
     plain[len_range(HMAC_POS_TAG, DRBG_OUTPUT_SIZE)].copy_from_slice(&compute_hmac(tag_keys.hmac_key, &cur_plain, 0x1d4, 0x34));
@@ -293,6 +308,7 @@ pub fn amiibo_unpack(amiibo_keys: &AmiiboKeys, amiibo: PackedAmiibo) -> Result<U
     // Regenerate data HMAC.
     let cur_plain = plain.clone();
     plain[len_range(HMAC_POS_DATA, DRBG_OUTPUT_SIZE)].copy_from_slice(&compute_hmac(data_keys.hmac_key, &cur_plain, 0x29, 0x1df));
+    // idk what it does so i get rid of it
     memcpy(&mut plain, 0x208, &tag, 0x208, 0x14);
     Ok(UnverifiedAmiibo {data: plain, intl} )
 }
@@ -311,9 +327,10 @@ pub fn amiibo_pack(amiibo_keys: &AmiiboKeys, plain_amiibo: PlainAmiibo) -> Resul
     data.extend_from_slice(&plain[len_range(0x1D4, 0x34)]); // Unknown
     cipher[len_range(HMAC_POS_DATA, DRBG_OUTPUT_SIZE)].copy_from_slice(&compute_hmac(data_keys.hmac_key, data.as_slice(), 0, data.len()));
 
-    cipher = amiibo_cipher(&data_keys, plain); 
+    // encrypt
+    amiibo_cipher(&data_keys, plain, &mut cipher); 
     let mut packed = amiibo_internal_to_tag(cipher);
-    
+    // why is this here :sob: 
     memcpy(&mut packed, 0x208, &plain, 0x208, 0x14);
     Ok(packed.into())
 }
@@ -356,10 +373,14 @@ pub fn read_amiibo_keys(key: [u8; 160]) -> Result<AmiiboKeys, AmiitoolError> {
     Ok(AmiiboKeys {data, tag})
 }
 use rand::Rng;
+
 pub fn gen_amiibo_raw(amiibo_id: [u8; 8], tag_uid: &[u8]) -> Result<PlainAmiibo, AmiitoolError> {
     if tag_uid.len() != 7 && tag_uid.len() != 9 {
         Err(AmiitoolError { why: "Not a 7 or 9 byte tag uid".to_string() } )
     } else {
+        if tag_uid[0] != 0x04 {
+            return Err(AmiitoolError { why: "Not a valid tag uid".to_string()});
+        }
         let (small_uid, bcc1, uid) = match tag_uid.len() {
             7 => {
                 let bcc0 = 0x88 ^ tag_uid[0] ^ tag_uid[1] ^ tag_uid[2];
@@ -390,19 +411,27 @@ pub fn gen_amiibo_raw(amiibo_id: [u8; 8], tag_uid: &[u8]) -> Result<PlainAmiibo,
         // set UID
         amiibo[len_range(0x1d4, 8)].copy_from_slice(&uid);
         amiibo[len_range(0,8)].copy_from_slice(&[bcc1, 0x48, 0 ,0 , 0xF1, 0x10, 0xFF, 0xEE]);
-        amiibo[0x28] = 0xA5;
-        amiibo[0x20B] = 0xBD;
+        // 0xA5 byte, write counter, unknown
+        amiibo[len_range(0x28, 4)].copy_from_slice(&[0xA5, 0,0,0]); 
+        // CFG 0 
         amiibo[0x20F] = 0x04;
-        amiibo[0x210] = 0x5F;
-        let mut rng = rand::thread_rng();
-        rng.fill(&mut amiibo[len_range(0x1E8, 32)]);
-        amiibo[len_range(0x1DC, 8)].copy_from_slice(&amiibo_id);
+        // CFG 1
+        amiibo[len_range(0x210, 4)].copy_from_slice(&[0x5F,0,0,0]);
+        // dynamic lock bits and RFUI
+        amiibo[len_range(0x208, 4)].copy_from_slice(&[0x01, 0x00, 0x0F, 0xBD]);
         amiibo[0x214] = pw1;
         amiibo[0x215] = pw2;
         amiibo[0x216] = pw3;
         amiibo[0x217] = pw4; 
         amiibo[0x218] = 0x80;
         amiibo[0x219] = 0x80;
+        // keygen salt
+        let mut rng = rand::thread_rng();
+        rng.fill(&mut amiibo[len_range(0x1E8, 32)]);
+        // TODO: this depends on input being big endian 
+        // amiibo id 
+        amiibo[len_range(0x1DC, 8)].copy_from_slice(&amiibo_id);
+
         Ok(amiibo.into())
         
     }
@@ -412,12 +441,15 @@ pub fn gen_amiibo(key: &AmiiboKeys, amiibo_id: [u8; 8], tag_uid: &[u8]) -> Resul
     let plain = gen_amiibo_raw(amiibo_id, tag_uid)?;
     amiibo_pack(key, plain)
 }
+
 fn compute_hmac(key: [u8; 16], input: &[u8], input_offset: usize, input_len: usize) -> [u8; DRBG_OUTPUT_SIZE]  {
     let mut hmac = Hmac256::new_from_slice(&key).expect("fixed length slice");
     hmac.update(&input[len_range(input_offset, input_len)]);
     hmac.finalize().into_bytes().try_into().unwrap()
         
 }
+
+
 /*
 fn printhex(data: &[u8]) {
     for i in 0..data.len() {
