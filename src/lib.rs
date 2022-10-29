@@ -9,7 +9,7 @@ mod tests {
         // this is an unencrpyted file
         let sample_unsigned : [u8; AMIIBO_SIZE]= std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
 
-        let packed_sample : [u8; AMIIBO_SIZE] = amiibo_pack(&keys, sample_unsigned.into()).unwrap().into();
+        let packed_sample : [u8; AMIIBO_SIZE] = PlainAmiibo::pack(sample_unsigned.into(), &keys).unwrap().into();
         std::fs::write("testpack.bin", packed_sample).unwrap(); 
         assert_eq!(packed_sample, sample_signed);
     }
@@ -19,7 +19,7 @@ mod tests {
         let sample_signed : [u8; AMIIBO_SIZE] = std::fs::read("sample_signed.bin").unwrap().try_into().unwrap();
         let sample_unsigned : [u8; AMIIBO_SIZE] = std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
 
-        let unpacked_sample : [u8; AMIIBO_SIZE] = amiibo_unpack(&keys, sample_signed.into()).unwrap().get_checked().expect("Invalid signature").into();
+        let unpacked_sample : [u8; AMIIBO_SIZE] = PackedAmiibo::unpack(sample_signed.into(), &keys).unwrap().get_checked().expect("Invalid signature").into();
         std::fs::write("testunpack.bin", unpacked_sample).unwrap();
         assert_eq!(unpacked_sample, sample_unsigned);
     }
@@ -31,6 +31,7 @@ use hmac::Mac;
 use sha2::Sha256;
 use std::io;
 use std::io::{Cursor, Write};
+/// The Master Keys for amiibo. 
 #[derive(Copy, Clone, Debug)]
 pub struct MasterKeys {
     pub hmac_key: [u8; 16],
@@ -39,28 +40,35 @@ pub struct MasterKeys {
     pub magic_bytes: [u8; 16],
     pub xor_pad: [u8; 32],
 }
+/// Keys derived from master keys.
 #[derive(Default,Copy, Clone,Debug)]
 struct DerivedKeys {
     aes_key: [u8; 16],
     aes_iv: [u8; 16],
     hmac_key: [u8; 16],
 }
+/// Wrapper type for raw data to ensure valid data. Can be converted to raw type with 
+/// [std::convert::Into]
 #[derive(Debug, Copy, Clone)]
 pub struct PackedAmiibo {
     amiibo: [u8; AMIIBO_SIZE]
 }
-
+/// Wrapper Type for raw data to ensure valid data. Can be converted to raw type with
+/// [std::convert::Into]
 #[derive(Debug, Copy, Clone)]
 pub struct PlainAmiibo {
     amiibo: [u8; AMIIBO_SIZE]
 }
 impl PlainAmiibo {
+    /// Amiibo ID
     pub fn amiibo_id(&self) -> [u8; 8] {
         self.amiibo[0x1DC..=0x1E3].try_into().unwrap()
     }
+    /// Character ID; Part of Amiibo ID
     pub fn character_id(&self) -> [u8; 2] {
         self.amiibo[0x1DC..=0x1DD].try_into().unwrap()
     }
+    /// Amiibo Nickname
     pub fn nickname(&self) -> String {
         let mut name_buf : [u8; 20] = self.amiibo[0x38..=0x4B].try_into().unwrap();
         for i in (0usize..20usize).step_by(2) {
@@ -71,6 +79,7 @@ impl PlainAmiibo {
         let utf16_buf : [u16; 10] = name_buf.chunks(2).map(|x| u16::from_le_bytes(x.try_into().unwrap())).collect::<Vec<u16>>().try_into().unwrap();
         String::from_utf16_lossy(&utf16_buf)
     }
+    /// Mii name
     pub fn mii_name(&self) -> String {
         let name_buf : [u16; 10] = self.amiibo[0x66..=0x79].chunks(2).map(|x| u16::from_le_bytes(x.try_into().unwrap())).collect::<Vec<u16>>().try_into().unwrap();
         String::from_utf16_lossy(&name_buf)
@@ -115,6 +124,7 @@ impl TryFrom<&[u8]> for PlainAmiibo {
 }
 
 impl PlainAmiibo {
+    /// Packs plain amiibo to Packed Amiibo. 
     pub fn pack(self, amiibo_keys: &AmiiboKeys) -> Result<PackedAmiibo, AmiitoolError> {
         let plain : [u8; AMIIBO_SIZE] = self.into();
         let mut cipher = [0; AMIIBO_SIZE];
@@ -137,6 +147,9 @@ impl PlainAmiibo {
         memcpy(&mut packed, 0x208, &plain, 0x208, 0x14);
         Ok(packed.into())
     }
+    /// Generate plain amiibo from Tag UID and Amiibo ID 
+    /// # Error conditions
+    /// Tag UID must be 7 or 9 bytes in length, and must begin with 0x04. 
     pub fn generate(amiibo_id: [u8; 8], tag_uid: &[u8]) -> Result<Self, AmiitoolError> {
         if tag_uid.len() != 7 && tag_uid.len() != 9 {
             Err(AmiitoolError { why: "Not a 7 or 9 byte tag uid".to_string() } )
@@ -200,6 +213,7 @@ impl PlainAmiibo {
     }
 }
 impl PackedAmiibo {
+    /// Unpacks amiibo.
     pub fn unpack(self, amiibo_keys: &AmiiboKeys) -> Result<UnverifiedAmiibo, AmiitoolError> {
         let tag : [u8; AMIIBO_SIZE] = self.into();
         // convert format
@@ -222,11 +236,14 @@ impl PackedAmiibo {
         memcpy(&mut plain, 0x208, &tag, 0x208, 0x14);
         Ok(UnverifiedAmiibo {data: plain, intl} )
     }
+    /// Generates PackedAmiibo given Amiibo ID and Tag UID. See [PlainAmiibo::generate] for
+    /// guidelines. 
     pub fn generate(amiibo_id: [u8; 8], tag_uid: &[u8], amiibo_keys: &AmiiboKeys) -> Result<Self, AmiitoolError> {
         let plain = PlainAmiibo::generate(amiibo_id, tag_uid)?;
         plain.pack(amiibo_keys)
     }
 }
+/// AmiitoolError. Can be converted to [std::io::Error] with [std::convert::Into].
 #[derive(Clone, Debug)]
 pub struct AmiitoolError {
     pub why : String
@@ -381,12 +398,13 @@ fn amiibo_internal_to_tag(internal: [u8; AMIIBO_SIZE]) -> [u8; AMIIBO_SIZE] {
     memcpy(&mut out, 0x054, &internal, 0x1DC, 0x02C);
     out
 }
-
+/// AmiiboKeys from file. 
 pub struct AmiiboKeys {
     pub data: MasterKeys,
     pub tag: MasterKeys,
 }
 impl AmiiboKeys {
+    /// Loads key given bytes. 
     pub fn load_keys(key: [u8; 160]) -> Result<Self, AmiitoolError> {
         let data = MasterKeys::load_key(key[0..80].try_into().unwrap())?;
         let tag  = MasterKeys::load_key(key[80..160].try_into().unwrap())?;
@@ -394,6 +412,7 @@ impl AmiiboKeys {
     }
 }
 impl MasterKeys {
+    /// Loads key given bytes. 
     pub fn load_key(key: [u8; 80]) -> Result<Self, AmiitoolError> {
         let res = MasterKeys {
             hmac_key: key[0..16].try_into().expect("Fixed slice size"),
@@ -411,6 +430,7 @@ impl MasterKeys {
 }
 const HMAC_POS_DATA: usize = 0x8;
 const HMAC_POS_TAG: usize = 0x1b4;
+/// An amiibo that can possibly have an invalid signature. 
 #[derive(Clone, Debug)]
 pub struct UnverifiedAmiibo {
     data : [u8; AMIIBO_SIZE],
@@ -418,6 +438,7 @@ pub struct UnverifiedAmiibo {
 }
 
 impl UnverifiedAmiibo {
+    /// Verifies signature. Returns an error if signature is invalid. 
     pub fn get_checked(self) -> Result<PlainAmiibo, AmiitoolError> {
         if self.is_valid() {
             Ok(self.data.into())
@@ -425,23 +446,30 @@ impl UnverifiedAmiibo {
             Err(AmiitoolError { why : "Invalid Signature".to_string() })
         }
     }
+    /// Returns true if signature is valid. 
     pub fn is_valid(&self) -> bool {
         self.data[HMAC_POS_DATA..HMAC_POS_DATA + 32] == self.intl[HMAC_POS_DATA..HMAC_POS_DATA + 32] 
            && self.data[HMAC_POS_TAG..HMAC_POS_TAG + 32] == self.intl[HMAC_POS_TAG..HMAC_POS_TAG + 32]
     }
+    /// Returns internal data, without verifying signature. 
     pub fn get_unchecked(self) -> PlainAmiibo {
         self.data.into()
     }
 }
 // legacy function
+#[deprecated]
+/// Use [PackedAmiibo::unpack] instead
 pub fn amiibo_unpack(amiibo_keys: &AmiiboKeys, amiibo: PackedAmiibo) -> Result<UnverifiedAmiibo, AmiitoolError> {
     amiibo.unpack(amiibo_keys)
 }
 // legacy function
+#[deprecated]
+/// Use [PlainAmiibo::pack] instead
 pub fn amiibo_pack(amiibo_keys: &AmiiboKeys, plain_amiibo: PlainAmiibo) -> Result<PackedAmiibo, AmiitoolError> {
     plain_amiibo.pack(amiibo_keys)
 }
 use std::io::{BufRead, BufReader, Read};
+/// Load keys from path. Prefer use of [std::fs::File] and [AmiiboKeys::load_keys] instead. 
 pub fn load_keys(path: &str) -> Result<AmiiboKeys, AmiitoolError> {
     let file = std::fs::File::open(path)?;
     let mut buf = BufReader::new(file);
@@ -457,6 +485,8 @@ pub fn load_keys(path: &str) -> Result<AmiiboKeys, AmiitoolError> {
     }
 }
 // legacy function
+#[deprecated]
+/// Use [MasterKeys::load_key] instead
 pub fn read_master_key(key: [u8; 80]) -> Result<MasterKeys, AmiitoolError> {
     MasterKeys::load_key(key)
 }
@@ -464,10 +494,14 @@ pub fn read_master_key(key: [u8; 80]) -> Result<MasterKeys, AmiitoolError> {
 
 use rand::Rng;
 
+#[deprecated]
+/// Use [PlainAmiibo::generate] instead
 pub fn gen_amiibo_raw(amiibo_id: [u8; 8], tag_uid: &[u8]) -> Result<PlainAmiibo, AmiitoolError> {
     PlainAmiibo::generate(amiibo_id, tag_uid) 
 }
 
+#[deprecated]
+/// Use [PackedAmiibo::generate] instead
 pub fn gen_amiibo(key: &AmiiboKeys, amiibo_id: [u8; 8], tag_uid: &[u8]) -> Result<PackedAmiibo, AmiitoolError> {
     PackedAmiibo::generate(amiibo_id, tag_uid, key)
 }
@@ -479,6 +513,8 @@ fn compute_hmac(key: [u8; 16], input: &[u8], input_offset: usize, input_len: usi
         
 }
 // legacy function 
+#[deprecated]
+/// Use [AmiiboKeys::load_keys] instead
 pub fn read_amiibo_keys(key: [u8; 160]) -> Result<AmiiboKeys, AmiitoolError> {
     AmiiboKeys::load_keys(key)
 }
