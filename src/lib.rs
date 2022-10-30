@@ -148,6 +148,7 @@ impl PlainAmiibo {
     /// Generate plain amiibo from Tag UID and Amiibo ID 
     /// # Error conditions
     /// Tag UID must be 7 or 9 bytes in length, and must begin with 0x04. 
+    /// Otherwise, an error will be returned.
     pub fn generate(amiibo_id: [u8; 8], tag_uid: &[u8]) -> Result<Self, AmiitoolError> {
         if tag_uid.len() != 7 && tag_uid.len() != 9 {
             Err(AmiitoolError { why: "Not a 7 or 9 byte tag uid".to_string() } )
@@ -329,6 +330,7 @@ fn drbg_gen_bytes<'a>(hmac_key: [u8; 16], seed: &[u8]) -> DerivedKeys {
         hmac_key: out[32..48].try_into().expect("fixed slice size")
     }
 }
+/// Size of amiibo data. 
 pub const AMIIBO_SIZE: usize = 540;
 fn amiibo_calc_seed(dump: [u8; AMIIBO_SIZE]) -> [u8; KEYGEN_SEED_SIZE] {
     let mut key: [u8; KEYGEN_SEED_SIZE] = [0; KEYGEN_SEED_SIZE];
@@ -398,7 +400,9 @@ fn amiibo_internal_to_tag(internal: [u8; AMIIBO_SIZE]) -> [u8; AMIIBO_SIZE] {
 }
 /// AmiiboKeys from file. 
 pub struct AmiiboKeys {
+    /// Keys for Data HMAC 
     pub data: MasterKeys,
+    /// Keys for Tag HMAC
     pub tag: MasterKeys,
 }
 impl AmiiboKeys {
@@ -428,7 +432,14 @@ impl MasterKeys {
 }
 const HMAC_POS_DATA: usize = 0x8;
 const HMAC_POS_TAG: usize = 0x1b4;
-/// An amiibo that can possibly have an invalid signature. 
+/// An amiibo that can possibly have an invalid signature.
+/// ```no_run
+/// let raw = PlainAmiibo::generate([0x08,0x05,0x02,0x00,0xff,0xff,0x04,0x02], [0x04,
+/// 0,0,0,0,0,0]);
+/// let keys = load_keys("key_retail.bin");
+/// // Unwrapping an unverified amiibo, panicing if invalid signature.
+/// let packed = raw.pack(keys).get_checked().unwrap();
+/// ```
 #[derive(Clone, Debug)]
 pub struct UnverifiedAmiibo {
     data : [u8; AMIIBO_SIZE],
