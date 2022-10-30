@@ -10,7 +10,6 @@ mod tests {
         let sample_unsigned : [u8; AMIIBO_SIZE]= std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
 
         let packed_sample : [u8; AMIIBO_SIZE] = PlainAmiibo::pack(sample_unsigned.into(), &keys).unwrap().into();
-        std::fs::write("testpack.bin", packed_sample).unwrap(); 
         assert_eq!(packed_sample, sample_signed);
     }
     #[test]
@@ -20,7 +19,6 @@ mod tests {
         let sample_unsigned : [u8; AMIIBO_SIZE] = std::fs::read("sample2_unsigned.bin").unwrap().try_into().unwrap();
 
         let unpacked_sample : [u8; AMIIBO_SIZE] = PackedAmiibo::unpack(sample_signed.into(), &keys).unwrap().get_checked().expect("Invalid signature").into();
-        std::fs::write("testunpack.bin", unpacked_sample).unwrap();
         assert_eq!(unpacked_sample, sample_unsigned);
     }
 }
