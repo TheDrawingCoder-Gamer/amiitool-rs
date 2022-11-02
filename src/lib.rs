@@ -21,6 +21,16 @@ mod tests {
         let unpacked_sample : [u8; AMIIBO_SIZE] = PackedAmiibo::unpack(sample_signed.into(), &keys).unwrap().get_checked().expect("Invalid signature").into();
         assert_eq!(unpacked_sample, sample_unsigned);
     }
+
+    fn gen_plain() -> PlainAmiibo {
+        PlainAmiibo::generate(0x08050200ffff0402u64.to_be_bytes(), &[4, 0,0,0,0,0,0]).unwrap()
+    }
+
+    #[test]
+    fn amiibo_id() {
+        let plain = gen_plain();
+        assert_eq!(0x08050200ffff0402u64.to_be_bytes(), plain.amiibo_id());
+    }
 }
 
 const KEYGEN_SEED_SIZE: usize = 64;
@@ -433,13 +443,6 @@ impl MasterKeys {
 const HMAC_POS_DATA: usize = 0x8;
 const HMAC_POS_TAG: usize = 0x1b4;
 /// An amiibo that can possibly have an invalid signature.
-/// ```no_run
-/// let raw = PlainAmiibo::generate([0x08,0x05,0x02,0x00,0xff,0xff,0x04,0x02], [0x04,
-/// 0,0,0,0,0,0]);
-/// let keys = load_keys("key_retail.bin");
-/// // Unwrapping an unverified amiibo, panicing if invalid signature.
-/// let packed = raw.pack(keys).get_checked().unwrap();
-/// ```
 #[derive(Clone, Debug)]
 pub struct UnverifiedAmiibo {
     data : [u8; AMIIBO_SIZE],
